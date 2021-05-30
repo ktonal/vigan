@@ -306,7 +306,7 @@ if __name__ == '__main__':
 
     print(net)
 
-    # this class knows how to instantiate db, Dataset and DataLoader from the model 
+    # this class knows how to instantiate db, Dataset and DataLoader from the model
     dm = mmk.DataModule(net, db)
 
     trainer = mmk.get_trainer(max_epochs=30000,
