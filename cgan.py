@@ -71,7 +71,6 @@ class Generator(nn.Module):
     img_size: int = 32
     n_classes: int = 10
     latent_dim: int = 100
-    emb_dim: int = 128
     lkrelu_negslop: float = .02
     bn_eps: float = .1
     bn_mom: float = .8
@@ -81,7 +80,7 @@ class Generator(nn.Module):
     def __post_init__(self):
         nn.Module.__init__(self)
 
-        self.label_emb = nn.Embedding(self.n_classes, self.emb_dim)
+        self.label_emb = nn.Embedding(self.n_classes, self.latent_dim)
 
         def block(in_feat, out_feat, normalize=True):
             layers = [nn.Linear(in_feat, out_feat)]
@@ -90,7 +89,7 @@ class Generator(nn.Module):
             layers.append(nn.LeakyReLU(self.lkrelu_negslop, inplace=True))
             return layers
 
-        dim_in = self.latent_dim + self.emb_dim
+        dim_in = self.latent_dim * 2
         self.model = nn.Sequential(
             *block(dim_in, dim_in * 2, normalize=False),
             *block(dim_in * 2, dim_in * 4),
@@ -99,7 +98,6 @@ class Generator(nn.Module):
         )
 
     def forward(self, noise, labels):
-        # Concatenate label embedding and image to produce input
         embs = self.label_emb(labels)
         # why not!!...
         noise = embs.abs().max() * noise
@@ -114,7 +112,6 @@ class Discriminator(nn.Module):
     img_channels: int = 3
     img_size: int = 32
     n_classes: int = 10
-    emb_dim: int = 128
     dim_out: int = 160
     lkrelu_negslop: float = .02
     bn_eps: float = .1
@@ -125,8 +122,6 @@ class Discriminator(nn.Module):
     def __post_init__(self):
         super(Discriminator, self).__init__()
 
-        self.label_embedding = nn.Embedding(self.n_classes, self.emb_dim)
-
         def block(in_feat, out_feat, normalize=False):
             layers = [nn.Linear(in_feat, out_feat)]
             if normalize:
@@ -134,19 +129,20 @@ class Discriminator(nn.Module):
             layers.append(nn.LeakyReLU(self.lkrelu_negslop, inplace=True))
             return layers
 
-        dim_in = self.emb_dim + int(np.prod(self.img_shape))
+        dim_in = int(np.prod(self.img_shape))
         self.model = nn.Sequential(
             *block(dim_in, self.dim_out*4),
             *block(self.dim_out*4, self.dim_out*2),
-            *block(self.dim_out*2, self.dim_out, normalize=False),
-            nn.Linear(self.dim_out, 1),
-            # real == 1 ; fake == -1
+            # ONE LAYER LESS!
+            # *block(self.dim_out*2, self.dim_out, normalize=False),
+            nn.Linear(self.dim_out*2, self.n_classes),
+            # Objective is to return 1 or -1 (real - fake) for the input's class
             nn.Tanh()
         )
 
-    def forward(self, img, labels):
-        # Concatenate label embedding and image to produce input
-        d_in = torch.cat((img.view(img.size(0), -1), self.label_embedding(labels)), -1)
+    def forward(self, img, labels=None):
+        # No labels in inputs! (objective is to get them right...)
+        d_in = img.view(img.size(0), -1)
         validity = self.model(d_in)
         return validity
 
@@ -169,7 +165,7 @@ class CGAN(pl.LightningModule):
         return dict(
             batch_size=self.batch_size,
             shuffle=True,
-            drop_last=False
+            drop_last=True
         )
 
     # __init__
@@ -190,10 +186,10 @@ class CGAN(pl.LightningModule):
 
     def __post_init__(self):
         pl.LightningModule.__init__(self)
-        self.adversarial_criterion = lambda out, trg: nn.MSELoss()(out, trg)
-        self.generator = Generator(self.img_channels, self.img_size, self.n_classes, self.latent_dim, self.emb_dim,
+        self.adversarial_criterion = lambda out, trg: nn.L1Loss()(out, trg)
+        self.generator = Generator(self.img_channels, self.img_size, self.n_classes, self.latent_dim,
                                    lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
-        self.discriminator = Discriminator(self.img_channels, self.img_size, self.n_classes, self.emb_dim,
+        self.discriminator = Discriminator(self.img_channels, self.img_size, self.n_classes,
                                            # last layer of D has same size has G's input...
                                            dim_out=self.emb_dim+self.latent_dim,
                                            lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
@@ -207,6 +203,7 @@ class CGAN(pl.LightningModule):
                                  lr=self.lr, betas=(self.b1, self.b2))
         opt_d = torch.optim.Adam(self.discriminator.parameters(),
                                  lr=self.lr, betas=(self.b1, self.b2))
+
         return [opt_g, opt_d], []
 
     def training_step(self, batch, batch_idx, optimizer_idx):
@@ -216,6 +213,7 @@ class CGAN(pl.LightningModule):
         # Adversarial ground truths
         valid = torch.ones(batch_size, 1, requires_grad=False, device=self.device)
         fake = - torch.ones(batch_size, 1, requires_grad=False, device=self.device)
+        rg = torch.arange(batch_size, device=self.device)
 
         # Sample noise and labels as generator input
         z = torch.randn(batch_size, self.latent_dim, device=self.device)
@@ -225,34 +223,39 @@ class CGAN(pl.LightningModule):
         gen_imgs = self.generator(z, gen_labels)
 
         # train generator
-        L = None
+        rv = dict(loss=None)
         if optimizer_idx == 0:
             # Loss measures generator's ability to fool the discriminator
-            validity = self.discriminator(gen_imgs, gen_labels)
-            L = self.adversarial_criterion(validity, valid)
+            validity = self.discriminator(gen_imgs)
+            L = self.adversarial_criterion(validity[rg, gen_labels], valid)
+            rv['loss'] = L
+            rv["G_loss"] = L
 
         # train discriminator
         if optimizer_idx == 1:
             # Loss for real images
-            validity_real = self.discriminator(real_imgs, labels)
-            d_real_loss = self.adversarial_criterion(validity_real, valid)
+            validity_real = self.discriminator(real_imgs)
+            d_real_loss = self.adversarial_criterion(validity_real[rg, labels], valid)
 
             # Loss for fake images
-            validity_fake = self.discriminator(gen_imgs.detach(), gen_labels)
-            d_fake_loss = self.adversarial_criterion(validity_fake, fake)
+            validity_fake = self.discriminator(gen_imgs.detach())
+            d_fake_loss = self.adversarial_criterion(validity_fake[rg, gen_labels], fake)
 
             # Total discriminator loss
-            L = (d_real_loss + d_fake_loss) / 2
+            L = (.5 * d_fake_loss + .5 * d_real_loss)
+            rv['loss'] = L
+            rv['D_loss'] = L
+            rv['Dr_loss'] = d_real_loss
+            rv['Df_loss'] = d_fake_loss
 
-        rv = {"loss": L, ('D_loss' if optimizer_idx == 1 else "G_loss"): L}
-        self.log_dict(rv, prog_bar=True, logger=False, on_step=True)
+        self.log_dict(rv, prog_bar=True, logger=True, on_step=True)
         return rv
 
     def sample_image(self, n_cols):
         """sample a grid of generated digits ranging from 0 to n_classes"""
         self.generator.eval()
         # Sample noise
-        z = torch.randn(n_cols * self.n_classes, self.generator.latent_dim, device=self.device)
+        z = torch.randn(n_cols * self.n_classes, self.latent_dim, device=self.device)
         # Get labels ranging from 0 to n_classes for n rows
         labels = torch.tensor([num for _ in range(n_cols) for num in range(self.n_classes)],
                               device=self.device, dtype=torch.long)
@@ -265,6 +268,7 @@ class CGAN(pl.LightningModule):
         Save a grid of outputs
         """
         if self.global_step == 1:
+            # reset the output folder...
             shutil.rmtree("images_output/")
             os.makedirs("images_output/")
         if self.global_step % 200 == 0:
@@ -276,9 +280,10 @@ class CGAN(pl.LightningModule):
 if __name__ == '__main__':
 
     # for a notebook or as cli
-
     import mimikit as mmk
     import numpy as np
+    import matplotlib.pyplot as plt
+    import pandas as pd
     import shutil
 
     img_size = 128
@@ -298,7 +303,7 @@ if __name__ == '__main__':
         bn_mom=0.5,
         batch_size=n_classes*10,
         lr=1e-4,
-        b1=.5, b2=.85,
+        b1=.5, b2=.9,
 
     )
 
@@ -314,5 +319,11 @@ if __name__ == '__main__':
                               callbacks=[],
                               checkpoint_callback=False)
 
+    shutil.rmtree("logs/")
+
     trainer.fit(net, datamodule=dm)
 
+    # plot the losses
+    losses = pd.read_csv('./logs/metrics.csv')
+    losses.drop(labels=['epoch', 'created_at'], axis=1).plot()
+    plt.show()
