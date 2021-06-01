@@ -65,6 +65,7 @@ The sources is a cli script. We turn it into LightningModules and make some litt
 
 """
 
+
 @dtc.dataclass(init=True, repr=False, eq=False, frozen=False, unsafe_hash=True)
 class Generator(nn.Module):
     img_channels: int = 3
@@ -80,7 +81,9 @@ class Generator(nn.Module):
     def __post_init__(self):
         nn.Module.__init__(self)
 
-        self.label_emb = nn.Embedding(self.n_classes, self.latent_dim)
+        # labels parametrize a gaussian :
+        self.label_mu = nn.Embedding(self.n_classes, self.latent_dim)
+        self.label_sigma = nn.Embedding(self.n_classes, self.latent_dim)
 
         def block(in_feat, out_feat, normalize=True):
             layers = [nn.Linear(in_feat, out_feat)]
@@ -89,7 +92,7 @@ class Generator(nn.Module):
             layers.append(nn.LeakyReLU(self.lkrelu_negslop, inplace=True))
             return layers
 
-        dim_in = self.latent_dim * 2
+        dim_in = self.latent_dim
         self.model = nn.Sequential(
             *block(dim_in, dim_in * 2, normalize=False),
             *block(dim_in * 2, dim_in * 4),
@@ -98,10 +101,8 @@ class Generator(nn.Module):
         )
 
     def forward(self, noise, labels):
-        embs = self.label_emb(labels)
-        # why not!!...
-        noise = embs.abs().max() * noise
-        gen_input = torch.cat((embs, noise), -1)
+        mu, sigma = self.label_mu(labels), self.label_sigma(labels)
+        gen_input = noise * sigma.mul_(.5).exp_() + mu
         img = self.model(gen_input)
         img = img.view(img.size(0), *self.img_shape)
         return img
@@ -133,11 +134,9 @@ class Discriminator(nn.Module):
         self.model = nn.Sequential(
             *block(dim_in, self.dim_out*4),
             *block(self.dim_out*4, self.dim_out*2),
-            # ONE LAYER LESS!
-            # *block(self.dim_out*2, self.dim_out, normalize=False),
-            nn.Linear(self.dim_out*2, self.n_classes),
-            # Objective is to return 1 or -1 (real - fake) for the input's class
-            nn.Tanh()
+            *block(self.dim_out*2, self.dim_out, normalize=False),
+            # outputs logits (no non-linearity) for n_classes * 2 (n_reals + n_fakes)
+            nn.Linear(self.dim_out, self.n_classes * 2),
         )
 
     def forward(self, img, labels=None):
@@ -186,7 +185,7 @@ class CGAN(pl.LightningModule):
 
     def __post_init__(self):
         pl.LightningModule.__init__(self)
-        self.adversarial_criterion = lambda out, trg: nn.L1Loss()(out, trg)
+        self.adversarial_criterion = lambda out, trg: nn.CrossEntropyLoss()(out, trg)
         self.generator = Generator(self.img_channels, self.img_size, self.n_classes, self.latent_dim,
                                    lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
         self.discriminator = Discriminator(self.img_channels, self.img_size, self.n_classes,
@@ -210,11 +209,6 @@ class CGAN(pl.LightningModule):
         real_imgs, labels = batch
         batch_size = real_imgs.shape[0]
 
-        # Adversarial ground truths
-        valid = torch.ones(batch_size, 1, requires_grad=False, device=self.device)
-        fake = - torch.ones(batch_size, 1, requires_grad=False, device=self.device)
-        rg = torch.arange(batch_size, device=self.device)
-
         # Sample noise and labels as generator input
         z = torch.randn(batch_size, self.latent_dim, device=self.device)
         gen_labels = torch.randint(0, self.n_classes, (batch_size, ), device=self.device)
@@ -227,7 +221,8 @@ class CGAN(pl.LightningModule):
         if optimizer_idx == 0:
             # Loss measures generator's ability to fool the discriminator
             validity = self.discriminator(gen_imgs)
-            L = self.adversarial_criterion(validity[rg, gen_labels], valid)
+            L = self.adversarial_criterion(validity, gen_labels)
+            # L_std = - torch.norm(self.generator.label_sigma.weight)
             rv['loss'] = L
             rv["G_loss"] = L
 
@@ -235,11 +230,12 @@ class CGAN(pl.LightningModule):
         if optimizer_idx == 1:
             # Loss for real images
             validity_real = self.discriminator(real_imgs)
-            d_real_loss = self.adversarial_criterion(validity_real[rg, labels], valid)
+            d_real_loss = self.adversarial_criterion(validity_real, labels)
 
             # Loss for fake images
             validity_fake = self.discriminator(gen_imgs.detach())
-            d_fake_loss = self.adversarial_criterion(validity_fake[rg, gen_labels], fake)
+            # fake classes are offset, hence gen_labels + n_classes
+            d_fake_loss = self.adversarial_criterion(validity_fake, gen_labels + self.n_classes)
 
             # Total discriminator loss
             L = (.5 * d_fake_loss + .5 * d_real_loss)
@@ -296,14 +292,15 @@ if __name__ == '__main__':
     net = CGAN(
         img_size=img_size,
         n_classes=n_classes,
-        emb_dim=16,
-        latent_dim=16,
-        lkrelu_negslop=0.25,
-        bn_eps=0.025,
-        bn_mom=0.5,
+        latent_dim=64,
+        # the smaller the slope -> the faster G overfits and makes consistent classes
+        lkrelu_negslop=0.1,
+        bn_eps=0.001,
+        # the higher the momentum -> the more psychadelic the style of the generated images
+        bn_mom=0.2,
         batch_size=n_classes*10,
-        lr=1e-4,
-        b1=.5, b2=.9,
+        lr=1e-3,
+        b1=.5, b2=.99,
 
     )
 
