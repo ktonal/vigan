@@ -4,7 +4,7 @@
 import cv2
 import numpy as np
 from mimikit import FileWalker
-
+import re
 
 def sorted_image_list(input_folder):
     files = list(FileWalker('img', input_folder))
@@ -36,6 +36,7 @@ class VideoGen():
 
 # to write a folder of images to a video file in numerically sorted order do:
 #
-# vg = VideoGen()
-# vg.write(sorted_image_list('images_output3'), 'testvideo.mp4')
+#
+# vg = VideoGen(codec='H265')
+# vg.write(sorted_image_list('images_output2'), 'testvideo.mp4')
 
