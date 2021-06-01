@@ -12,5 +12,5 @@ def slerp(val, low, high):
 
 
 def slerp_space(low, high, n_steps):
-    return slerp(torch.linspace(0., 1., n_steps), low, high)
+    return slerp(torch.linspace(0., 1., n_steps).to(low), low, high)
 

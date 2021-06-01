@@ -72,7 +72,7 @@ The sources is a cli script. We turn it into LightningModules and make some litt
 
 
 @dtc.dataclass(init=True, repr=False, eq=False, frozen=False, unsafe_hash=True)
-class Generator(nn.Module):
+class Generator(pl.LightningModule):
     img_channels: int = 3
     img_size: int = 32
     n_classes: int = 10
@@ -113,6 +113,16 @@ class Generator(nn.Module):
         img = self.model(gen_input)
         img = img.view(img.size(0), *self.img_shape)
         return img
+
+    def slerp_labels(self, l_low, l_high, n_samples=200):
+        inpt = torch.tensor([l_low, l_high]).to(self.device)
+        # we also interpolate in latent space
+        mus, sigs = self.label_mu(inpt), self.label_sigma(inpt).mul_(.5).exp_()
+        mu_slerped = slerp_space(mus[0], mus[1], n_samples)
+        s_slerped = slerp_space(sigs[0], sigs[1], n_samples)
+        z = torch.randn(n_samples, self.latent_dim).to(self.device)
+        out = self.model(z * s_slerped + mu_slerped)
+        return out.view(n_samples, *self.img_shape)
 
 
 @dtc.dataclass(init=True, repr=False, eq=False, frozen=False, unsafe_hash=True)
@@ -281,6 +291,12 @@ class CGAN(pl.LightningModule):
         self.generator.train()
         return imgs
 
+    def sample_slerp_labels(self, l_low, l_high, n_samples=200):
+        self.generator.eval()
+        imgs = self.generator.slerp_labels(l_low, l_high, n_samples)
+        self.generator.train()
+        return imgs
+
     def on_train_batch_end(self, *args, **kwargs):
         """
         Save a grid of outputs
@@ -295,8 +311,10 @@ class CGAN(pl.LightningModule):
             # imgs = self.sample_image(self.n_classes)
             # grid = tv.utils.make_grid(imgs, self.n_classes)
             # tv.utils.save_image(grid, f"images_output/step_{self.global_step}.jpeg")
-            imgs = self.sample_label(label=torch.randint(self.n_classes, (1,)).item(),
-                                     n_samples=torch.randint(1, 10, (1,)).item() * 26)
+
+            # imgs = self.sample_label(label=torch.randint(self.n_classes, (1,)).item(),
+            #                          n_samples=torch.randint(1, 10, (1,)).item() * 26)
+            imgs = self.sample_slerp_labels(0, 1, 400)
             # reshape (channels must be last!) and to numpy
             imgs = imgs.detach().transpose(1, 3).transpose(1, 2).cpu().numpy()
             # convert to dtype
