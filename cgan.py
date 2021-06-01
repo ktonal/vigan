@@ -273,6 +273,14 @@ class CGAN(pl.LightningModule):
         self.generator.train()
         return imgs
 
+    def sample_label(self, label, n_samples=200):
+        self.generator.eval()
+        labels = torch.ones(n_samples, dtype=torch.int, device=self.device) * label
+        z = torch.randn(n_samples, self.latent_dim, device=self.device)
+        imgs = self.generator(z, labels)
+        self.generator.train()
+        return imgs
+
     def on_train_batch_end(self, *args, **kwargs):
         """
         Save a grid of outputs
@@ -282,11 +290,19 @@ class CGAN(pl.LightningModule):
             shutil.rmtree("images_output/")
             os.makedirs("images_output/")
         if self.global_step % self.sample_every == 0:
-            imgs = self.sample_image(self.n_classes)
-            grid = tv.utils.make_grid(imgs, self.n_classes)
             if not os.path.isdir('images_output'):
                 os.makedirs('images_output')
-            tv.utils.save_image(grid, f"images_output/step_{self.global_step}.jpeg")
+            # imgs = self.sample_image(self.n_classes)
+            # grid = tv.utils.make_grid(imgs, self.n_classes)
+            # tv.utils.save_image(grid, f"images_output/step_{self.global_step}.jpeg")
+            imgs = self.sample_label(label=torch.randint(self.n_classes, (1,)).item(),
+                                     n_samples=torch.randint(1, 10, (1,)).item() * 26)
+            # reshape (channels must be last!) and to numpy
+            imgs = imgs.detach().transpose(1, 3).transpose(1, 2).cpu().numpy()
+            # convert to dtype
+            imgs = (imgs * 255).astype(np.uint8)
+            vg = VideoGen(26)
+            vg.write(imgs, f"images_output/step_{self.global_step}.mp4")
 
 
 if __name__ == '__main__':
@@ -306,6 +322,7 @@ if __name__ == '__main__':
     n_classes = len(set(db.labels[:]))
 
     net = CGAN(
+        sample_every=100,
         img_size=img_size,
         n_classes=n_classes,
         latent_dim=32,
