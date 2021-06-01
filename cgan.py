@@ -172,7 +172,6 @@ class CGAN(pl.LightningModule):
     img_size: int = 32
     n_classes: int = 10
     latent_dim: int = 32
-    emb_dim: int = 128
     lkrelu_negslop: float = .02
     bn_eps: float = .1
     bn_mom: float = .8
@@ -190,7 +189,7 @@ class CGAN(pl.LightningModule):
                                    lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
         self.discriminator = Discriminator(self.img_channels, self.img_size, self.n_classes,
                                            # last layer of D has same size has G's input...
-                                           dim_out=self.emb_dim+self.latent_dim,
+                                           dim_out=self.latent_dim,
                                            lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
         self._set_hparams(dtc.asdict(self))
 
@@ -297,7 +296,7 @@ if __name__ == '__main__':
         lkrelu_negslop=0.1,
         bn_eps=0.001,
         # the higher the momentum -> the more psychadelic the style of the generated images
-        bn_mom=0.2,
+        bn_mom=0.5,
         batch_size=n_classes*10,
         lr=1e-3,
         b1=.5, b2=.99,
