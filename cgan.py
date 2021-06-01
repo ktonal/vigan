@@ -319,7 +319,7 @@ class CGAN(pl.LightningModule):
             imgs = imgs.detach().transpose(1, 3).transpose(1, 2).cpu().numpy()
             # convert to dtype
             imgs = (imgs * 255).astype(np.uint8)
-            vg = VideoGen(26)
+            vg = VideoGen(14)
             vg.write(imgs, f"images_output/step_{self.global_step}.mp4")
 
 
@@ -332,7 +332,7 @@ if __name__ == '__main__':
     import pandas as pd
     import shutil
 
-    img_size = 128
+    img_size = 200
 
     db = mmk.Database.create('img_test.h5', ['./data'],
                              CGAN.schema(img_size=img_size))
@@ -340,18 +340,18 @@ if __name__ == '__main__':
     n_classes = len(set(db.labels[:]))
 
     net = CGAN(
-        sample_every=100,
+        sample_every=200,
         img_size=img_size,
         n_classes=n_classes,
-        latent_dim=32,
-        n_layers=5,
+        latent_dim=64,
+        n_layers=4,
         rcrop=1,
         # the smaller the slope -> the faster G overfits and makes consistent classes
         lkrelu_negslop=0.1,
         bn_eps=0.001,
         # the higher the momentum -> the more psychadelic the style of the generated images
         bn_mom=0.2,
-        batch_size=n_classes*10,
+        batch_size=n_classes*5,
         lr=1e-3,
         b1=.5, b2=.99,
 
