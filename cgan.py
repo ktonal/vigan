@@ -18,7 +18,7 @@ import sys
 
 # this allows import from vigan/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname("__file__"), '..')))
-
+from vigan.write_video import VideoGen, sorted_image_list
 from vigan.sampling import slerp_space
 
 
@@ -193,6 +193,8 @@ class CGAN(pl.LightningModule):
 
     batch_size: int = 8
 
+    sample_every: int = 100
+
     def __post_init__(self):
         pl.LightningModule.__init__(self)
         self.adversarial_criterion = lambda out, trg: nn.CrossEntropyLoss()(out, trg)
@@ -279,7 +281,7 @@ class CGAN(pl.LightningModule):
             # reset the output folder...
             shutil.rmtree("images_output/")
             os.makedirs("images_output/")
-        if self.global_step % 200 == 0:
+        if self.global_step % self.sample_every == 0:
             imgs = self.sample_image(self.n_classes)
             grid = tv.utils.make_grid(imgs, self.n_classes)
             if not os.path.isdir('images_output'):
