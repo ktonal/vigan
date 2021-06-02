@@ -7,7 +7,7 @@ WORKS on the mimikit branch experiment/cgan
 import dataclasses as dtc
 import torch.nn as nn
 import torch
-
+import math
 import pytorch_lightning as pl
 
 import torchvision as tv
@@ -87,30 +87,33 @@ class Generator(pl.LightningModule):
     def __post_init__(self):
         nn.Module.__init__(self)
 
+        channels = [1] + ([256] * (self.n_layers - 1)) + [3]
         # labels parametrize a gaussian :
         self.label_mu = nn.Embedding(self.n_classes, self.latent_dim)
         self.label_sigma = nn.Embedding(self.n_classes, self.latent_dim)
 
-        def block(in_feat, out_feat, normalize=True):
-            layers = [nn.Linear(in_feat, out_feat)]
+        def block(layer_i, in_feat, out_feat, normalize=True):
+            layers = [
+                nn.Conv2d(in_feat, out_feat, (3, 3), padding=1),
+                nn.Upsample(scale_factor=2)
+            ]
             if normalize:
-                layers.append(nn.BatchNorm1d(out_feat, self.bn_eps, self.bn_mom))
+                layers.append(nn.BatchNorm2d(out_feat, self.bn_eps, self.bn_mom))
             layers.append(nn.LeakyReLU(self.lkrelu_negslop, inplace=True))
             return nn.Sequential(*layers)
 
-        dim_in = self.latent_dim
-        assert self.n_layers >= 1, 'n_layers must be >= 2'
-        dims = [(dim_in * 2**i, dim_in * 2**(i+1)) for i in range(self.n_layers-1)]
         self.model = nn.Sequential(
-            *[block(d1, d2, normalize=bool(i==0)) for i, (d1, d2) in enumerate(dims)],
-            nn.Linear(dim_in * 2**(self.n_layers-1), int(np.prod(self.img_shape))),
+            *[block(i, c, channels[i + 1], normalize=bool(i != 0)) for i, c in enumerate(channels[:-1])],
             nn.Sigmoid()
         )
 
     def forward(self, noise, labels):
         mu, sigma = self.label_mu(labels), self.label_sigma(labels)
         gen_input = noise * sigma.mul_(.5).exp_() + mu
-        img = self.model(gen_input)
+        size = int(math.sqrt(self.latent_dim))
+        img = gen_input.view(-1, 1, size, size)
+        for mod in self.model:
+            img = mod(img)
         img = img.view(img.size(0), *self.img_shape)
         return img
 
@@ -121,7 +124,9 @@ class Generator(pl.LightningModule):
         mu_slerped = slerp_space(mus[0], mus[1], n_samples)
         s_slerped = slerp_space(sigs[0], sigs[1], n_samples)
         z = torch.randn(n_samples, self.latent_dim).to(self.device)
-        out = self.model(z * s_slerped + mu_slerped)
+        size = int(math.sqrt(self.latent_dim))
+        inpt = (z * s_slerped + mu_slerped).view(-1, 1, size, size)
+        out = self.model(inpt)
         return out.view(n_samples, *self.img_shape)
 
 
@@ -209,10 +214,10 @@ class CGAN(pl.LightningModule):
         pl.LightningModule.__init__(self)
         self.adversarial_criterion = lambda out, trg: nn.CrossEntropyLoss()(out, trg)
         self.generator = Generator(self.img_channels, self.img_size, self.n_classes, self.latent_dim,
-                                   n_layers=self.n_layers-1,
+                                   n_layers=self.n_layers,
                                    lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
         self.discriminator = Discriminator(self.img_channels, self.img_size, self.n_classes,
-                                           n_layers=self.n_layers,
+                                           n_layers=self.n_layers-2,
                                            # last layer of D has same size has G's input...
                                            dim_out=self.latent_dim,
                                            lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
@@ -332,7 +337,7 @@ if __name__ == '__main__':
     import pandas as pd
     import shutil
 
-    img_size = 200
+    img_size = 128
 
     db = mmk.Database.create('img_test.h5', ['./data'],
                              CGAN.schema(img_size=img_size))
@@ -347,13 +352,13 @@ if __name__ == '__main__':
         n_layers=4,
         rcrop=1,
         # the smaller the slope -> the faster G overfits and makes consistent classes
-        lkrelu_negslop=0.1,
+        lkrelu_negslop=0.3333,
         bn_eps=0.001,
         # the higher the momentum -> the more psychadelic the style of the generated images
-        bn_mom=0.2,
-        batch_size=n_classes*5,
+        bn_mom=0.1,
+        batch_size=n_classes*2,
         lr=1e-3,
-        b1=.5, b2=.99,
+        b1=.75, b2=.9,
 
     )
 
