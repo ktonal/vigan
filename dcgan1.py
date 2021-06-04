@@ -230,13 +230,13 @@ loss_fn = nn.BCELoss()
 
 
 
-for epoch in range(4000, 8000):
+for epoch in range(4000):
     loss_d = 0.0
     loss_g = 0.0
     data = torch.stack([transforms(img) for img in images])
     dl = DataLoader(ImgsLabels(data.to(device), labels.to(device)), batch_size=24, shuffle=True, drop_last=True)
     for i, batch in enumerate(dl):
-        batch = next(iter(dl))
+        #batch = next(iter(dl))
         real_imgs, labs = batch
         batch_size = real_imgs.shape[0]
         generator.zero_grad()
