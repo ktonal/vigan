@@ -122,7 +122,7 @@ class CGAN(pl.LightningModule):
                 return nn.Sequential(
                     *[LinearLayer(
                         dims[i], dims[i + 1],
-                        normalize=True,
+                        normalize=i != 0,
                         # pass matching kwargs stored in gan
                         **filter_cls_kwargs(LinearLayer, dtc.asdict(gan))
                     )
@@ -184,6 +184,7 @@ class CGAN(pl.LightningModule):
         return [opt_g, opt_d], []
 
     def training_step(self, batch, batch_idx, optimizer_idx):
+        self.generator.inpt.count = int(max(1., self.global_step ** .75))
         return wasserstein_loss(self, batch, batch_idx, optimizer_idx)
 
     def sample_image(self, n_cols):
@@ -229,17 +230,17 @@ if __name__ == '__main__':
     n_classes = len(set(db.labels[:]))
 
     net = CGAN(
-        sample_every=200,
+        sample_every=5,
         img_size=img_size,
         n_classes=n_classes,
-        latent_dim=128,
+        latent_dim=64,
         n_layers=4,
         rcrop=0,
-        lkrelu_negslop=.2,
-        bn_eps=0.0001,
+        lkrelu_negslop=.1,
+        bn_eps=0.001,
         bn_mom=0.05,
-        batch_size=n_classes * 2,
-        lr=3e-4,
+        batch_size=n_classes * 1,
+        lr=1e-4,
         b1=.5, b2=.995,
 
     )
@@ -260,6 +261,9 @@ if __name__ == '__main__':
         shutil.rmtree("logs/")
 
     trainer.fit(net, datamodule=dm)
+
+    vg = VideoGen()
+    vg.write(sorted_image_list('images_output'), 'full-training.mp4')
 
     # plot the losses
     losses = pd.read_csv('./logs/metrics.csv')

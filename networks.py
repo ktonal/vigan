@@ -92,7 +92,7 @@ class MultinomialGenerator(nn.Module):
         embs = self.labels_probs(labels)
         probs = nn.Softmax(dim=-1)(embs)
         z = torch.distributions.Multinomial(self.count, probs).sample()
-        return z * probs
+        return z * probs / self.count
 
     def entropy(self):
         pr = nn.Softmax(dim=-1)(self.labels_probs.weight)
@@ -182,10 +182,13 @@ class ImgNet(pl.LightningModule):
 
     def __post_init__(self):
         pl.LightningModule.__init__(self)
+        self.inpt = self.inpt_()
+        self.layers = self.layers_()
+        self.outpt = self.outpt_()
         self.model = nn.Sequential(
-            self.inpt_(),
-            self.layers_(),
-            self.outpt_()
+            self.inpt,
+            self.layers,
+            self.outpt
         )
 
     def forward(self, x):
