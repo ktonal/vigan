@@ -235,11 +235,11 @@ if __name__ == '__main__':
         n_classes=n_classes,
         latent_dim=64,
         n_layers=4,
-        rcrop=0,
+        rcrop=4,
         lkrelu_negslop=.1,
-        bn_eps=0.001,
-        bn_mom=0.05,
-        batch_size=n_classes * 1,
+        bn_eps=0.01,
+        bn_mom=0.005,
+        batch_size=n_classes * 2,
         lr=1e-4,
         b1=.5, b2=.995,
 
@@ -252,7 +252,7 @@ if __name__ == '__main__':
     # this class knows how to instantiate db, Dataset and DataLoader from the model
     dm = mmk.DataModule(net, db)
 
-    trainer = mmk.get_trainer(max_epochs=30000,
+    trainer = mmk.get_trainer(max_epochs=3000,
                               enable_pl_optimizer=False,
                               callbacks=[],
                               checkpoint_callback=False)
