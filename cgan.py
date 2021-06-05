@@ -18,8 +18,9 @@ import sys
 
 # this allows import from vigan/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname("__file__"), '..')))
-from vigan.write_video import VideoGen, sorted_image_list
-from vigan.sampling import slerp_space
+from vigan.sampling import *
+from vigan.objectives import *
+from vigan.networks import *
 
 
 # Sketch for an Image Loader
@@ -60,123 +61,22 @@ class DirectoryLabels(Feature):
         return np.array([lbls[x] for x in paths])
 
 
-"""
-
-Rest is taken/adapted from 
-    
-    https://github.com/eriklindernoren/PyTorch-GAN/blob/master/implementations/cgan/cgan.py
-    
-The sources is a cli script. We turn it into LightningModules and make some little modifications... 
-
-"""
-
-
-@dtc.dataclass(init=True, repr=False, eq=False, frozen=False, unsafe_hash=True)
-class Generator(pl.LightningModule):
-    img_channels: int = 3
-    img_size: int = 32
-    n_classes: int = 10
-    latent_dim: int = 100
-    n_layers: int = 3
-    lkrelu_negslop: float = .02
-    bn_eps: float = .1
-    bn_mom: float = .8
-
-    img_shape = property(lambda self: (self.img_channels, self.img_size, self.img_size))
-
-    def __post_init__(self):
-        nn.Module.__init__(self)
-
-        # labels parametrize a gaussian :
-        self.label_mu = nn.Embedding(self.n_classes, self.latent_dim)
-        self.label_sigma = nn.Embedding(self.n_classes, self.latent_dim)
-
-        def block(in_feat, out_feat, normalize=True):
-            layers = [nn.Linear(in_feat, out_feat)]
-            if normalize:
-                layers.append(nn.BatchNorm1d(out_feat, self.bn_eps, self.bn_mom))
-            layers.append(nn.LeakyReLU(self.lkrelu_negslop, inplace=True))
-            return nn.Sequential(*layers)
-
-        dim_in = self.latent_dim
-        assert self.n_layers >= 1, 'n_layers must be >= 2'
-        dims = [(dim_in * 2**i, dim_in * 2**(i+1)) for i in range(self.n_layers-1)]
-        self.model = nn.Sequential(
-            *[block(d1, d2, normalize=bool(i==0)) for i, (d1, d2) in enumerate(dims)],
-            nn.Linear(dim_in * 2**(self.n_layers-1), int(np.prod(self.img_shape))),
-            nn.Sigmoid()
-        )
-
-    def forward(self, noise, labels):
-        mu, sigma = self.label_mu(labels), self.label_sigma(labels)
-        gen_input = noise * sigma.mul_(.5).exp_() + mu
-        img = self.model(gen_input)
-        img = img.view(img.size(0), *self.img_shape)
-        return img
-
-    def slerp_labels(self, l_low, l_high, n_samples=200):
-        inpt = torch.tensor([l_low, l_high]).to(self.device)
-        # we also interpolate in latent space
-        mus, sigs = self.label_mu(inpt), self.label_sigma(inpt).mul_(.5).exp_()
-        mu_slerped = slerp_space(mus[0], mus[1], n_samples)
-        s_slerped = slerp_space(sigs[0], sigs[1], n_samples)
-        z = torch.randn(n_samples, self.latent_dim).to(self.device)
-        out = self.model(z * s_slerped + mu_slerped)
-        return out.view(n_samples, *self.img_shape)
-
-
-@dtc.dataclass(init=True, repr=False, eq=False, frozen=False, unsafe_hash=True)
-class Discriminator(nn.Module):
-    img_channels: int = 3
-    img_size: int = 32
-    n_classes: int = 10
-    n_layers: int = 4
-    dim_out: int = 160
-    lkrelu_negslop: float = .02
-    bn_eps: float = .1
-    bn_mom: float = .8
-
-    img_shape = property(lambda self: (self.img_channels, self.img_size, self.img_size))
-
-    def __post_init__(self):
-        super(Discriminator, self).__init__()
-
-        def block(in_feat, out_feat, normalize=False):
-            layers = [nn.Linear(in_feat, out_feat)]
-            if normalize:
-                layers.append(nn.BatchNorm1d(out_feat, self.bn_eps, self.bn_mom))
-            layers.append(nn.LeakyReLU(self.lkrelu_negslop, inplace=True))
-            return nn.Sequential(*layers)
-
-        dim_in = int(np.prod(self.img_shape))
-        assert self.n_layers >= 2, 'n_layers must be >= 2'
-        dims = reversed([(self.dim_out * 2**(i+1), self.dim_out * 2**i) for i in range(self.n_layers-2)])
-        self.model = nn.Sequential(
-            *block(dim_in, self.dim_out*2**(self.n_layers-2)),
-            *[block(d1, d2, normalize=False) for d1, d2 in dims],
-            # outputs logits (no non-linearity) for n_classes * 2 (n_reals + n_fakes)
-            nn.Linear(self.dim_out, self.n_classes * 2),
-        )
-
-    def forward(self, img, labels=None):
-        # No labels in inputs! (objective is to get them right...)
-        d_in = img.view(img.size(0), -1)
-        validity = self.model(d_in)
-        return validity
-
-
 @dtc.dataclass(init=True, repr=False, eq=False, frozen=False)
 class CGAN(pl.LightningModule):
 
     # DB
     @classmethod
     def schema(cls, img_size=64):
-        return {'img': Image(img_size=img_size), 'labels': DirectoryLabels()}
+        return {
+            'img': Image(img_size=img_size),
+            'labels': DirectoryLabels()
+        }
 
     # Dataset
     def batch_signature(self, stage='fit'):
         from mimikit.data import Input
-        return Input('img', transform=tv.transforms.RandomCrop(self.img_size, padding=self.rcrop, padding_mode='reflect')), Input('labels')
+        return Input('img', transform=tv.transforms.RandomCrop(self.img_size, padding=self.rcrop,
+                                                               padding_mode='reflect')), Input('labels')
 
     # Dataloader
     def loader_kwargs(self, stage, datamodule):
@@ -188,12 +88,12 @@ class CGAN(pl.LightningModule):
 
     # __init__
     img_channels: int = 3
-    img_size: int = 32
-    rcrop: int = 2
+    img_size: int = 128
+    rcrop: int = 0
     n_classes: int = 10
-    latent_dim: int = 32
+    latent_dim: int = 64
     n_layers: int = 4
-    lkrelu_negslop: float = .02
+    lkrelu_negslop: float = .2
     bn_eps: float = .1
     bn_mom: float = .8
 
@@ -205,21 +105,75 @@ class CGAN(pl.LightningModule):
 
     sample_every: int = 100
 
+    def generator_(self):
+        gan = self
+
+        class G(ImgNet):
+
+            def inpt_(self):
+                return MultinomialGenerator(
+                    latent_dim=gan.latent_dim,
+                    n_classes=gan.n_classes
+                )
+
+            def layers_(self):
+                nz = gan.latent_dim
+                dims = [nz * 2 ** i for i in range(gan.n_layers)]
+                return nn.Sequential(
+                    *[LinearLayer(
+                        dims[i], dims[i + 1],
+                        normalize=True,
+                        # pass matching kwargs stored in gan
+                        **filter_cls_kwargs(LinearLayer, dtc.asdict(gan))
+                    )
+                        for i in range(gan.n_layers - 1)],
+                    nn.Linear(dims[-1], self.flat_img_dim)
+                )
+
+            def outpt_(self):
+                return nn.Sequential(
+                    nn.Hardsigmoid(),
+                    Reshape(self.img_shape)
+                )
+
+        return G(self.img_channels, self.img_size, self.n_classes)
+
+    def discriminator_(self):
+        gan = self
+
+        class D(ImgNet):
+
+            def inpt_(self):
+                return nn.Flatten()
+
+            def layers_(self):
+                dims = [gan.latent_dim * 2 ** i for i in range(gan.n_layers - 1, -1, -1)]
+                self.dims = dims
+                return nn.Sequential(
+                    nn.Linear(self.flat_img_dim, dims[0]),
+                    *[LinearLayer(
+                        dims[i], dims[i + 1],
+                        normalize=False,
+                        # pass matching kwargs stored in gan
+                        **filter_cls_kwargs(LinearLayer, dtc.asdict(gan))
+                    )
+                        for i in range(gan.n_layers - 2)],
+                )
+
+            def outpt_(self):
+                return nn.Sequential(
+                    nn.Linear(self.dims[-1] * 2, 1),
+                    # nn.Sigmoid()
+                )
+
+        return D(self.img_channels, self.img_size, self.n_classes)
+
     def __post_init__(self):
         pl.LightningModule.__init__(self)
-        self.adversarial_criterion = lambda out, trg: nn.CrossEntropyLoss()(out, trg)
-        self.generator = Generator(self.img_channels, self.img_size, self.n_classes, self.latent_dim,
-                                   n_layers=self.n_layers-1,
-                                   lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
-        self.discriminator = Discriminator(self.img_channels, self.img_size, self.n_classes,
-                                           n_layers=self.n_layers,
-                                           # last layer of D has same size has G's input...
-                                           dim_out=self.latent_dim,
-                                           lkrelu_negslop=self.lkrelu_negslop, bn_eps=self.bn_eps, bn_mom=self.bn_mom)
+        self.generator = self.generator_()
+        self.discriminator = self.discriminator_()
+        self.automatic_optimization = False
         self._set_hparams(dtc.asdict(self))
-
-    def forward(self, z, labels):
-        return self.generator(z, labels)
 
     def configure_optimizers(self):
         opt_g = torch.optim.Adam(self.generator.parameters(),
@@ -230,70 +184,15 @@ class CGAN(pl.LightningModule):
         return [opt_g, opt_d], []
 
     def training_step(self, batch, batch_idx, optimizer_idx):
-        real_imgs, labels = batch
-        batch_size = real_imgs.shape[0]
-
-        # Sample noise and labels as generator input
-        z = torch.randn(batch_size, self.latent_dim, device=self.device)
-        gen_labels = torch.randint(0, self.n_classes, (batch_size, ), device=self.device)
-
-        # Generate a batch of images
-        gen_imgs = self.generator(z, gen_labels)
-
-        # train generator
-        rv = dict(loss=None)
-        if optimizer_idx == 0:
-            # Loss measures generator's ability to fool the discriminator
-            validity = self.discriminator(gen_imgs)
-            L = self.adversarial_criterion(validity, gen_labels)
-            # L_std = - torch.norm(self.generator.label_sigma.weight)
-            rv['loss'] = L
-            rv["G_loss"] = L
-
-        # train discriminator
-        if optimizer_idx == 1:
-            # Loss for real images
-            validity_real = self.discriminator(real_imgs)
-            d_real_loss = self.adversarial_criterion(validity_real, labels)
-
-            # Loss for fake images
-            validity_fake = self.discriminator(gen_imgs.detach())
-            # fake classes are offset, hence gen_labels + n_classes
-            d_fake_loss = self.adversarial_criterion(validity_fake, gen_labels + self.n_classes)
-
-            # Total discriminator loss
-            L = (.5 * d_fake_loss + .5 * d_real_loss)
-            rv['loss'] = L
-            rv['D_loss'] = L
-            rv['Dr_loss'] = d_real_loss
-            rv['Df_loss'] = d_fake_loss
-
-        self.log_dict(rv, prog_bar=True, logger=True, on_step=True)
-        return rv
+        return wasserstein_loss(self, batch, batch_idx, optimizer_idx)
 
     def sample_image(self, n_cols):
         """sample a grid of generated digits ranging from 0 to n_classes"""
         self.generator.eval()
-        # Sample noise
-        z = torch.randn(n_cols * self.n_classes, self.latent_dim, device=self.device)
         # Get labels ranging from 0 to n_classes for n rows
         labels = torch.tensor([num for _ in range(n_cols) for num in range(self.n_classes)],
                               device=self.device, dtype=torch.long)
-        imgs = self.generator(z, labels)
-        self.generator.train()
-        return imgs
-
-    def sample_label(self, label, n_samples=200):
-        self.generator.eval()
-        labels = torch.ones(n_samples, dtype=torch.int, device=self.device) * label
-        z = torch.randn(n_samples, self.latent_dim, device=self.device)
-        imgs = self.generator(z, labels)
-        self.generator.train()
-        return imgs
-
-    def sample_slerp_labels(self, l_low, l_high, n_samples=200):
-        self.generator.eval()
-        imgs = self.generator.slerp_labels(l_low, l_high, n_samples)
+        imgs = self.generator.forward(labels)
         self.generator.train()
         return imgs
 
@@ -301,6 +200,7 @@ class CGAN(pl.LightningModule):
         """
         Save a grid of outputs
         """
+
         if self.global_step == 1:
             # reset the output folder...
             shutil.rmtree("images_output/")
@@ -308,23 +208,12 @@ class CGAN(pl.LightningModule):
         if self.global_step % self.sample_every == 0:
             if not os.path.isdir('images_output'):
                 os.makedirs('images_output')
-            # imgs = self.sample_image(self.n_classes)
-            # grid = tv.utils.make_grid(imgs, self.n_classes)
-            # tv.utils.save_image(grid, f"images_output/step_{self.global_step}.jpeg")
-
-            # imgs = self.sample_label(label=torch.randint(self.n_classes, (1,)).item(),
-            #                          n_samples=torch.randint(1, 10, (1,)).item() * 26)
-            imgs = self.sample_slerp_labels(0, 1, 400)
-            # reshape (channels must be last!) and to numpy
-            imgs = imgs.detach().transpose(1, 3).transpose(1, 2).cpu().numpy()
-            # convert to dtype
-            imgs = (imgs * 255).astype(np.uint8)
-            vg = VideoGen(14)
-            vg.write(imgs, f"images_output/step_{self.global_step}.mp4")
+            imgs = self.sample_image(self.n_classes)
+            grid = tv.utils.make_grid(imgs, self.n_classes)
+            tv.utils.save_image(grid, f"images_output/step_{self.global_step}.jpeg")
 
 
 if __name__ == '__main__':
-
     # for a notebook or as cli
     import mimikit as mmk
     import numpy as np
@@ -332,7 +221,7 @@ if __name__ == '__main__':
     import pandas as pd
     import shutil
 
-    img_size = 200
+    img_size = 128
 
     db = mmk.Database.create('img_test.h5', ['./data'],
                              CGAN.schema(img_size=img_size))
@@ -343,17 +232,15 @@ if __name__ == '__main__':
         sample_every=200,
         img_size=img_size,
         n_classes=n_classes,
-        latent_dim=64,
+        latent_dim=128,
         n_layers=4,
-        rcrop=1,
-        # the smaller the slope -> the faster G overfits and makes consistent classes
-        lkrelu_negslop=0.1,
-        bn_eps=0.001,
-        # the higher the momentum -> the more psychadelic the style of the generated images
-        bn_mom=0.2,
-        batch_size=n_classes*5,
-        lr=1e-3,
-        b1=.5, b2=.99,
+        rcrop=0,
+        lkrelu_negslop=.2,
+        bn_eps=0.0001,
+        bn_mom=0.05,
+        batch_size=n_classes * 2,
+        lr=3e-4,
+        b1=.5, b2=.995,
 
     )
 
@@ -369,7 +256,8 @@ if __name__ == '__main__':
                               callbacks=[],
                               checkpoint_callback=False)
 
-    shutil.rmtree("logs/")
+    if os.path.exists("logs/"):
+        shutil.rmtree("logs/")
 
     trainer.fit(net, datamodule=dm)
 
